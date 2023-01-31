@@ -56,16 +56,6 @@ int write(object_state *the_object,
         AUDIT printk( "%s: new buffer content:  %s has been written", MODNAME, new_buffer );
         kfree(new_content);
 
-        // if (session->priority == LOW_PRIORITY){
-        //         __sync_add_and_fetch (&lp_threads[minor], 1);
-        //         mutex_lock(&(the_object->operation_synchronizer));
-        //         __sync_add_and_fetch (&lp_threads[minor], -1);
-        //         wq = &the_object->wq;
-        // }else{
-        //         wq = get_lock(the_object, session, minor);
-        //         if (wq == NULL)
-        //                 return -EAGAIN;
-        // }
         wq = get_lock(the_object, session, minor);
         if (wq == NULL)
                 return -EAGAIN;
