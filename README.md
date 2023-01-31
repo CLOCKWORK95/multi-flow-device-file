@@ -53,7 +53,7 @@ sudo rmmod multi_flow.ko
 
 ```bash
 # compilazione (nella directory di user.c)
-make
+make all
 
 # lancio del programma (major number può differire) 
 sudo ./user /dev/my-device <major> <minor>
@@ -63,7 +63,7 @@ sudo ./user /dev/my-device <major> <minor>
 ----
 
 ```bash
-sudo cat /sys/module/multi_flow/parameters/enabled_device
+sudo cat /sys/module/multi_flow/parameters/disabled_device
 sudo cat /sys/module/multi_flow/parameters/hp_bytes
 sudo cat /sys/module/multi_flow/parameters/lp_bytes
 sudo cat /sys/module/multi_flow/parameters/hp_threads
