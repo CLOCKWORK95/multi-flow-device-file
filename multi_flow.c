@@ -17,8 +17,8 @@ static int Major; /* Major number assigned to char device driver */
 #define get_minor(session) MINOR(session->f_dentry->d_inode->i_rdev)
 #endif
 
-static int dev_open(struct inode *inode, struct file *file)
-{
+
+static int dev_open(struct inode *inode, struct file *file) {
 
    session *session;
    int minor = get_minor(file);
@@ -32,7 +32,7 @@ static int dev_open(struct inode *inode, struct file *file)
    }
 
    session = kzalloc(sizeof(session), GFP_ATOMIC);
-   AUDIT printk("%s: ALLOCATED new session\n", MODNAME);
+   AUDIT printk("%s: allocated new session\n", MODNAME);
    if (session == NULL)
    {
       printk("%s: unable to allocate new session\n", MODNAME);
@@ -49,8 +49,8 @@ static int dev_open(struct inode *inode, struct file *file)
    return 0;
 }
 
-static int dev_release(struct inode *inode, struct file *file)
-{
+
+static int dev_release(struct inode *inode, struct file *file) {
 
    session *session = file->private_data;
    kfree(session);
@@ -60,105 +60,162 @@ static int dev_release(struct inode *inode, struct file *file)
    return 0;
 }
 
-static ssize_t dev_write(struct file *filp, const char *buff, size_t len, loff_t *off)
-{
-   object_state *priority_obj;
-   int ret;
-   int minor = get_minor(filp);
-   object_state *the_object = objects[minor];
-   session *session = filp -> private_data;
 
-   if (session->priority == HIGH_PRIORITY)
-   {
+static ssize_t dev_write(struct file *filp, const char __user *buff, size_t len, loff_t *off) {
 
-      priority_obj = &the_object[HIGH_PRIORITY];
+   int ret, res, priority, blocking, minor, major;
+   gfp_t flags;
+   data_segment *new_segment;
+   object_state *current_stream_state;
+   session *session;
 
-      if (session->blocking == BLOCKING){ 
-         AUDIT printk("%s: somebody called a BLOCKING HIGH-PRIORITY write on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-      }else{ 
-         AUDIT printk("%s: somebody called a NON-BLOCKING HIGH-PRIORITY write on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-      }
-      ret = write(priority_obj, buff, off, len, session, minor);
-      if (ret < 0)
-      {
-         AUDIT printk("%s: Error on HIGH-PRIORITY write on dev with [major,minor] number "\
-         "[%d,%d]\n", MODNAME, get_major(filp), minor);
-         return ret;
-      }
+   minor = get_minor(filp);
+   major = get_major(filp);
+   
+   session = filp -> private_data;
+   priority = session -> priority;
+   blocking = session -> blocking;
 
-      return len - ret;
-   }
-   else
-   {
+   current_stream_state = &objects[minor][priority]; //check if correct
 
-      priority_obj = &the_object[LOW_PRIORITY];
+   if (unlikely(len == 0))
+            return 0;
 
-      if (session->blocking == BLOCKING){ 
-         AUDIT printk("%s: somebody called a BLOCKING LOW-PRIORITY write on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-      }else{ 
-         AUDIT printk("%s: somebody called a NON-BLOCKING LOW-PRIORITY write on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-      }
-      ret = put_work((char *)buff, len, off, session, minor);
-      if (ret != 0)
-      {
-         AUDIT printk("%s: Error on LOW-PRIORITY write on dev with [major,minor] number "\
-         "[%d,%d]\n", MODNAME, get_major(filp), minor);
-         return ret;
-      }
+   flags = (blocking == BLOCKING) ? GFP_KERNEL : GFP_ATOMIC;
+
+   new_segment = (data_segment *) kzalloc(sizeof(data_segment), flags);
+   if (unlikely(new_segment == NULL))
+            return -ENOMEM;
+
+   new_segment -> buffer = (char *) kzalloc(len, flags);
+   if (unlikely(new_segment -> buffer == NULL))
+            return free_data_segment(new_segment, ENOMEM);
+
+   res = copy_from_user(new_segment -> buffer, buff, len);
+   if (unlikely(res == len))
+            return free_data_segment(new_segment, ENOMEM);
+
+   if(blocking == BLOCKING) {
       
-      return len;
-   }
-}
+      AUDIT printk("%s current thread is going to wait for space available for writing on device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME, major, minor);
 
-static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off)
-{
+      inc_pending_threads(minor,priority);
+      ret = wait_event_interruptible_timeout(
+                     current_stream_state -> wq,
+                     check_if_writable_and_try_lock(current_stream_state, priority),
+                     msecs_to_jiffies(session -> timeout)
+               );
+      dec_pending_threads(minor,priority);
 
-   object_state *priority_obj;
-   int ret;
-   int minor = get_minor(filp);
-   object_state *the_object = objects[minor];
-   session *session = filp->private_data;
+      AUDIT printk("%s current thread has waken up from wait queue related to device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME, major, minor);
 
-   if (session->priority == HIGH_PRIORITY)
-   {
+      if(ret == 0) {
+         AUDIT printk("%s timer has expired for current thread and cannot write on device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME, major, minor);
 
-      priority_obj = &the_object[HIGH_PRIORITY];
+         return free_data_segment(new_segment, ETIME);
 
-      if (session->blocking == BLOCKING){ 
-         AUDIT printk("%s: somebody called a BLOCKING read on HIGH-PRIORITY flow on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-      
-      }else{ 
-         AUDIT printk("%s: somebody called a NON-BLOCKING read on HIGH-PRIORITY flow on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
+      } else if(ret == -ERESTARTSYS) {
+         AUDIT printk("%s current thread received a signal while waiting for space on device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME, major, minor);
+
+         return free_data_segment(new_segment, EINTR);
       }
-   }
-   else
-   {
+   } else {
+            if (!mutex_trylock(&(current_stream_state -> operation_synchronizer)))
+                     return free_data_segment(new_segment, EBUSY)                   ;
 
-      priority_obj = &the_object[LOW_PRIORITY];
-
-      if (session->blocking == BLOCKING){ 
-         AUDIT printk("%s: somebody called a BLOCKING read on LOW-PRIORITY flow on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-
-      }else{ 
-         AUDIT printk("%s: somebody called a NON-BLOCKING read on LOW-PRIORITY flow on dev with " \
-         "[major,minor] number [%d,%d]\n", MODNAME, get_major(filp), minor);
-      }
+            if (unlikely(writable_bytes(current_stream_state, priority) == 0)) {
+                     mutex_unlock(&(current_stream_state -> operation_synchronizer));
+                     return free_data_segment(new_segment, EAGAIN);
+            }
    }
 
-   ret = read(priority_obj, buff, off, len, session, minor);
+   new_segment-> actual_size = MIN(len - res, writable_bytes(current_stream_state, priority));
+
+   if (priority == HIGH_PRIORITY) {
+            ret = write( new_segment, current_stream_state );
+   } else {
+            if ((ret = put_work(current_stream_state, new_segment, major, minor, flags)) < 0) {
+                     mutex_unlock(&(current_stream_state->operation_synchronizer));
+                     // It gives the possibility to other threads to try to write
+                     wake_up_interruptible(&(current_stream_state -> wq));
+                     return free_data_segment(new_segment, -ret);
+            }
+   }
+
+   mutex_unlock(&(current_stream_state -> operation_synchronizer));
+   wake_up_interruptible(&(current_stream_state -> wq));
 
    return ret;
 }
 
-static long dev_ioctl(struct file *filp, unsigned int command, unsigned long param)
-{
+
+static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) {
+   
+   int ret, priority, blocking, major, minor;
+   object_state *current_stream_state;
+   session *session;
+   
+   minor = get_minor(filp);
+   major = get_major(filp);
+   
+   session = filp -> private_data;
+   priority = session -> priority;
+   blocking = session -> blocking;
+
+   current_stream_state = &objects[minor][priority]; //check if correct
+
+   AUDIT printk("%s current thread has called a read on %s device [MAJOR: %d, minor: %d]",
+         MODNAME, DEVICE_NAME ,major, minor);
+
+   if (unlikely(len == 0))
+            return 0;
+
+   if (blocking == BLOCKING) {
+      AUDIT printk("%s current thread is waiting for bytes to read from device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME , major, minor);
+
+      inc_pending_threads(minor,priority);
+      ret = wait_event_interruptible_timeout(
+                     current_stream_state -> wq,
+                     check_if_readable_and_try_lock(current_stream_state),
+                     msecs_to_jiffies(session -> timeout)
+            );
+      dec_pending_threads(minor,priority);
+
+      AUDIT printk("%s current thread has woken up from wait queue related to device %s [MAJOR: %d, minor: %d]",
+         MODNAME, DEVICE_NAME , major, minor);
+
+      if(ret == 0) {
+         AUDIT printk("%s timer has expired for current thread and it is not possible to read from device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME, major, minor);
+
+         return -ETIME;
+      } else if(ret == -ERESTARTSYS) {
+         AUDIT printk("%s current thread was hit with a signal while waiting for bytes to read on device %s [MAJOR: %d, minor: %d]",
+            MODNAME, DEVICE_NAME, major, minor);
+
+         return -EINTR;
+      }
+   } else {
+      if (!mutex_trylock( &(current_stream_state -> operation_synchronizer) ))
+         return -EBUSY;
+   }
+
+   ret = read(current_stream_state, buff, len);
+
+   mutex_unlock(&(current_stream_state->operation_synchronizer));
+   wake_up_interruptible(&(current_stream_state->wq));
+
+   return ret;
+}
+
+
+
+static long dev_ioctl(struct file *filp, unsigned int command, unsigned long param) {
 
    session *session;
    session = filp->private_data;
@@ -197,16 +254,21 @@ static long dev_ioctl(struct file *filp, unsigned int command, unsigned long par
    return 0;
 }
 
+
+
 static struct file_operations fops = {
     .owner = THIS_MODULE,
     .write = dev_write,
     .read = dev_read,
     .open = dev_open,
     .release = dev_release,
-    .unlocked_ioctl = dev_ioctl};
+    .unlocked_ioctl = dev_ioctl
+};
 
-int init_module(void)
-{
+
+
+
+int init_module(void) {
 
    int i, j;
    // initialize the driver internal state
@@ -218,14 +280,22 @@ int init_module(void)
 
          mutex_init(&(objects[i][j].operation_synchronizer));
 
-         objects[i][j].buffer = kzalloc(OBJECT_MAX_SIZE, GFP_KERNEL);
-         if (objects[i][j].buffer == NULL)
+         objects[i][j].head = kzalloc(sizeof(data_segment), GFP_KERNEL);
+         objects[i][j].tail = kzalloc(sizeof(data_segment), GFP_KERNEL);
+         if (objects[i][j].head == NULL || objects[i][j].tail == NULL)
          {
-            printk("%s: unable to allocate a new memory node\n", MODNAME);
+            printk("%s: unable to allocate a new data_segment\n", MODNAME);
             goto revert_allocation;
          }
 
-         objects[i][j].valid_bytes = 0;
+         objects[i][j].head->next = (objects[i][j].tail);
+         objects[i][j].head->previous = NULL;
+         objects[i][j].head->buffer = NULL;
+
+         objects[i][j].tail->next = NULL;
+         objects[i][j].tail->previous = (objects[i][j].head);
+         objects[i][j].tail->buffer = NULL;
+
          init_waitqueue_head(&objects[i][j].wq);
 
       }
@@ -249,22 +319,33 @@ revert_allocation:
    {
       for (; j >= 0; j--)
       {
-         kfree(objects[i][j].buffer);
+         kfree(objects[i][j].head);
+         kfree(objects[i][j].tail);
       }
    }
    return -ENOMEM;
 }
 
-void cleanup_module(void)
-{
+
+
+void cleanup_module(void) {
 
    int i, j;
+   object_state *node;
+   data_segment *head, *current_segment;
 
    for (i = 0; i < MINORS; i++)
    {
       for (j = 0; j < DATA_FLOWS; j++)
       {
-         kfree(objects[i][j].buffer);
+         node = &(objects[i][j]);
+         head = node -> head;
+         while ( (head -> next) != (node -> tail)) {
+            current_segment = head -> next;
+            head->next = head->next->next;
+            kfree(current_segment->buffer);
+            kfree(current_segment);
+         }
       }
    }
 

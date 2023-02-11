@@ -1,76 +1,45 @@
-#include "blocking.h"
 #include "info.h"
 
-int get_min( int a, int b );
-int read(object_state *, char *, loff_t *, size_t, session *, int);
+int read(object_state *, char __user *, size_t);
 
 
+int read(object_state *current_stream_state, char __user *buff, size_t len) {
 
-int get_min( int a, int b ) {
-   if ( a <= b ) return a;
-   return b;
-}
+   int res;
+   size_t read_bytes, current_readable_bytes, current_read_len;
+   data_segment *current_segment, *head;
 
+   if (unlikely(current_stream_state -> valid_bytes == 0))
+            return -EAGAIN;
 
+   read_bytes = 0;
 
-int read(object_state *the_object,
-         char *buff,
-         loff_t *off,
-         size_t len,
-         session *session,
-         int minor) {
+   head = current_stream_state -> head;
 
-   int ret = 0, buff_length = 0, bytes_to_read = 0 , diff = 0;
+   while ((head -> next != current_stream_state -> tail) && (len > read_bytes)) {
+      
+      current_segment = head -> next;
+      current_readable_bytes = current_segment -> actual_size - current_segment -> off;
+      current_read_len = MIN(len - read_bytes, current_readable_bytes);
 
-   char* remaining_buff_content;
+      res = copy_to_user(buff + read_bytes, &(current_segment -> buffer[current_segment -> off]), current_read_len);
 
-   wait_queue_head_t *wq;
+      read_bytes += ( current_read_len - res );
+      current_segment -> off += ( current_read_len - res );
 
-   wq = get_lock( the_object, session, minor );
-   if (wq == NULL)
-      return -EAGAIN;
+      if (current_segment -> off == current_segment -> actual_size) {
+               head->next = head->next->next;
+               head->next->previous = head;
 
-   *off = 0;
+               kfree(current_segment -> buffer);
+               kfree(current_segment);
+      }
 
-   buff_length = strlen( the_object -> buffer );
-
-   bytes_to_read = get_min( buff_length, (int) len );
-
-   ret = copy_to_user( buff, &( the_object -> buffer[0] ), bytes_to_read );
-
-   ret += bytes_to_read;
-
-   if ( buff_length  > bytes_to_read ){ 
-      // delete & shift (FIFO)
-      diff = buff_length - bytes_to_read;
-      remaining_buff_content = kzalloc( diff, GFP_ATOMIC );
-      if ( remaining_buff_content == NULL )
-        {
-                AUDIT printk("%s: unable to allocate memory buffer.\n", MODNAME);
-                return -ENOMEM;
-        }
-      strncpy( &remaining_buff_content[0], &( the_object -> buffer[ bytes_to_read ] ), diff );
-      kfree( the_object -> buffer );
-      the_object -> buffer = kzalloc( OBJECT_MAX_SIZE, GFP_ATOMIC );
-      strncpy( the_object -> buffer, &remaining_buff_content[0], diff );
-      kfree( remaining_buff_content );
-   }
-   else{
-      // just delete
-      kfree( the_object -> buffer );
-      the_object -> buffer = kzalloc( OBJECT_MAX_SIZE, GFP_ATOMIC );
+      if (unlikely(res != 0))
+               break;
    }
 
-   *off += diff;
-   the_object -> valid_bytes = diff;
+   current_stream_state->valid_bytes -= read_bytes;
 
-   if (session->priority == HIGH_PRIORITY)
-      hp_bytes[minor] -= ret;
-   else
-      lp_bytes[minor] -= ret;
-
-   mutex_unlock(&(the_object->operation_synchronizer));
-   wake_up(wq);
-
-   return ret;
+   return read_bytes;
 }
