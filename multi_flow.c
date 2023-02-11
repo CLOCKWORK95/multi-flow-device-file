@@ -76,7 +76,7 @@ static ssize_t dev_write(struct file *filp, const char __user *buff, size_t len,
    priority = session -> priority;
    blocking = session -> blocking;
 
-   current_stream_state = &objects[minor][priority]; //check if correct
+   current_stream_state = &objects[minor][priority];
 
    if (unlikely(len == 0))
             return 0;
@@ -92,6 +92,7 @@ static ssize_t dev_write(struct file *filp, const char __user *buff, size_t len,
             return free_data_segment(new_segment, ENOMEM);
 
    res = copy_from_user(new_segment -> buffer, buff, len);
+   
    if (unlikely(res == len))
             return free_data_segment(new_segment, ENOMEM);
 
@@ -166,7 +167,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
    priority = session -> priority;
    blocking = session -> blocking;
 
-   current_stream_state = &objects[minor][priority]; //check if correct
+   current_stream_state = &objects[minor][priority];
 
    AUDIT printk("%s current thread has called a read on %s device [MAJOR: %d, minor: %d]",
          MODNAME, DEVICE_NAME ,major, minor);
@@ -175,6 +176,7 @@ static ssize_t dev_read(struct file *filp, char *buff, size_t len, loff_t *off) 
             return 0;
 
    if (blocking == BLOCKING) {
+
       AUDIT printk("%s current thread is waiting for bytes to read from device %s [MAJOR: %d, minor: %d]",
             MODNAME, DEVICE_NAME , major, minor);
 
